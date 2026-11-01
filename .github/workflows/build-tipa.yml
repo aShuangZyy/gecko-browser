@@ -1,23 +1,27 @@
 name: Build Gecko TIPA
 
-# 编译 Reynard 的 Gecko 引擎 + app，输出可被 TrollStore 安装的 .tipa。
-# 触发：手动（workflow_dispatch）或 push 到 main 且改动相关目录 / tag。
+# 编译 Reynard 的 Gecko 引擎 + app，输出 TrollStore 可直接安装的 .tipa。
+# 步骤与上游 minh-ton/reynard-browser 的 .github/workflows/build.yml 保持一致，
+# 只保留 standard 变体（TrollStore 用），砍掉 normal IPA / jailbroken 两条。
+#
+# 触发：Actions 页手动 Run workflow，或 push 到 main / 打 v* tag。
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "要构建的分支或 tag（默认 main）"
+        description: "要构建的分支或 tag"
         required: false
         default: "main"
   push:
     branches: [main]
     tags: ["v*"]
+    # 只在这些目录变化时自动构建；改 workflow 本身不会触发，避免白白烧 3 小时。
     paths:
-      - ".github/workflows/build-tipa.yml"
       - "browser/**"
       - "patches/**"
       - "tools/**"
+      - "engine/release.txt"
 
 concurrency:
   group: gecko-tipa-${{ github.ref }}
@@ -34,85 +38,100 @@ jobs:
 
     env:
       SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
-      # Gecko 交叉编译目标
-      GECKO_TARGET: aarch64-apple-ios
-      GECKO_MIN_IOS: "13.0"
 
     steps:
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
-          submodules: recursive
           fetch-depth: 0
+          submodules: false
 
-      - name: Select Xcode
+      - name: Set up latest Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: "26.6"
 
       - name: Install build dependencies
         run: |
-          brew update
-          brew install ldid cbindgen llvm sccache python@3.12
-          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+          brew install python@3.12 lld cbindgen llvm
+          echo "$(brew --prefix python@3.12)/libexec/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
-      - name: Set up Rust
+      - name: Initialize submodules
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive support/idevice
+          git submodule update --init --depth 1 engine/firefox
+
+      - name: Update Gecko source
+        run: ./tools/development/update-gecko.sh
+
+      - name: Apply Gecko patches
+        run: ./tools/development/apply-patches.sh
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
 
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Hash Rust toolchain for cache
+        id: rust_toolchain
+        run: echo "hash=$(rustc -Vv | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
-      # 注意：不要缓存 engine/obj-aarch64-apple-ios（几十 GB，会撑爆 GitHub 10GB 限制）。
-      - name: Cache toolchain caches
+      - name: Restore Gecko dependency cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             ~/.mozbuild
-          key: gecko-${{ runner.os }}-${{ hashFiles('patches/**', 'tools/**') }}
+          key: buildcache-gecko-deps-standard-${{ steps.rust_toolchain.outputs.hash }}-${{ hashFiles('engine/release.txt') }}
           restore-keys: |
-            gecko-${{ runner.os }}-
+            buildcache-gecko-deps-standard-${{ steps.rust_toolchain.outputs.hash }}-
 
-      - name: Sync Gecko sources
-        run: ./tools/development/update-gecko.sh
+      - name: Restore idevice build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            support/idevice/target
+            browser/Reynard/JIT/RPPairing/libidevice_ffi.a
+          key: buildcache-idevice-${{ steps.rust_toolchain.outputs.hash }}-${{ hashFiles('support/idevice/Cargo.lock', 'support/idevice/Cargo.toml', 'tools/development/build-idevice.sh') }}
+          restore-keys: |
+            buildcache-idevice-${{ steps.rust_toolchain.outputs.hash }}-
 
-      - name: Apply iOS patches
-        run: ./tools/development/apply-patches.sh
-
-      - name: Build idevice FFI
-        run: ./tools/development/build-idevice.sh
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Build Gecko
+        env:
+          CC: clang
+          CXX: clang++
+          LD: ld64.lld
+          MOZ_NOSPAM: "1"
         run: ./tools/development/build-gecko.sh --use-sccache --auto-clobber
 
-      - name: Prepare xcconfig
-        run: |
-          mkdir -p dist
-          if [ -f browser/Configuration/Reynard.xcconfig ]; then
-            cp browser/Configuration/Reynard.xcconfig dist/Reynard.xcconfig
-          fi
-          echo "CURRENT_BUILD=$(git rev-parse --short HEAD)" >> dist/Reynard.xcconfig
+      - name: Build idevice support library
+        run: ./tools/development/build-idevice.sh
 
-      - name: Build app (unsigned)
-        run: ./tools/development/build-app.sh --no-signing
+      - name: Install packaging dependencies
+        run: brew install ldid
 
-      - name: Package TrollStore TIPA
-        run: ./tools/development/create-ipa.sh --trollstore
+      - name: Build app
+        run: ./tools/release/build-app.sh --no-signing
+
+      - name: Create TrollStore TIPA
+        run: ./tools/release/create-ipa.sh --trollstore
 
       - name: Show artifacts
         run: ls -la dist
 
-      - name: Upload artifact
+      - name: Upload TrollStore TIPA
         uses: actions/upload-artifact@v4
         with:
           name: GeckoBrowser-TrollStore
-          path: dist/*.tipa
+          path: dist/Reynard-TrollStore.tipa
           if-no-files-found: error
           retention-days: 14
 
@@ -120,5 +139,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tipa
+          files: dist/Reynard-TrollStore.tipa
           generate_release_notes: true
