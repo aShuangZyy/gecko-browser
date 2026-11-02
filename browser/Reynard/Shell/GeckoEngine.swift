@@ -2,8 +2,11 @@
 //  GeckoEngine.swift
 //  GeckoBrowser / M1
 //
-//  BrowserEngine 的 Gecko 实现。用的是 Reynard 自带的 GeckoView 封装
-//  （browser/GeckoView/），所以这里不 import 任何框架——源码同属一个 target。
+//  BrowserEngine 的 Gecko 实现。
+//
+//  注意：GeckoView 在工程里是一个**独立 framework target**
+//  （pbxproj 里 `GeckoView` 的 productType 是 com.apple.product-type.framework），
+//  所以要 `import GeckoView`，不能当成同 target 的源码。
 //
 //  生命周期顺序（错一步就黑屏）：
 //    1. GeckoSession(settings: .default)
@@ -13,6 +16,7 @@
 //
 
 import UIKit
+import GeckoView
 
 final class GeckoEngine: NSObject, BrowserEngine {
     private let session: GeckoSession
