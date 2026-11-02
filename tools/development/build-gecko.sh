@@ -1,5 +1,11 @@
 #!/bin/sh
 
+# 与上游 tools/development/build-gecko.sh 相同，只多一个开关：
+#   NO_LTO=1 环境变量，或传 --no-lto，就跳过 --enable-lto。
+# 动机：GitHub macos-26 runner 上 LTO 会把冷构建拖到 3.5 小时以上，
+# 逼近 360 分钟作业上限。关掉 LTO 后冷构建通常 60–100 分钟，代价是
+# Gecko 产物略大、运行时性能略低（对浏览器外壳的验证阶段可接受）。
+
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -10,6 +16,11 @@ TARGET="aarch64-apple-ios"
 USE_SCCACHE=false
 AUTO_CLOBBER=false
 DISABLE_JEMALLOC=false
+USE_LTO=true
+
+if [ "${NO_LTO:-0}" = "1" ]; then
+	USE_LTO=false
+fi
 
 for arg in "$@"; do
 	case "$arg" in
@@ -21,6 +32,9 @@ for arg in "$@"; do
 			;;
 		--disable-jemalloc)
 			DISABLE_JEMALLOC=true
+			;;
+		--no-lto)
+			USE_LTO=false
 			;;
 	esac
 done
@@ -48,7 +62,9 @@ fi
 	echo "ac_add_options --enable-optimize"
 	echo "ac_add_options --enable-release"
 	echo "ac_add_options --enable-rust-simd"
-	echo "ac_add_options --enable-lto"
+	if [ "$USE_LTO" = true ]; then
+		echo "ac_add_options --enable-lto"
+	fi
 	echo "ac_add_options --disable-debug"
 	echo "ac_add_options --disable-tests"
 	echo "ac_add_options --enable-bootstrap"
