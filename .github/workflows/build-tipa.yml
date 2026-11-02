@@ -34,7 +34,7 @@ jobs:
   build:
     name: macos-26 / Xcode 26.6 / arm64
     runs-on: macos-26
-    timeout-minutes: 360
+    timeout-minutes: 540
 
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -110,6 +110,9 @@ jobs:
           CXX: clang++
           LD: ld64.lld
           MOZ_NOSPAM: "1"
+          # 关掉 LTO：4 核 runner 上 LTO 冷构建会超过 4 小时并撞作业超时。
+          # 换来 60–100 分钟的构建；产物略大、运行时略慢，验证阶段可接受。
+          NO_LTO: "1"
         run: ./tools/development/build-gecko.sh --use-sccache --auto-clobber
 
       - name: Build idevice support library
