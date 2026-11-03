@@ -97,16 +97,29 @@ final class GeckoEngine: NSObject, BrowserEngine {
 
     // MARK: - 外部协议
 
-    /// `x-safari-https://x.com/a` → `https://x.com/a`
-    private static func stripSafariPrefix(_ uri: String) -> String? {
-        guard let colon = uri.range(of: ":"), uri.lowercased().hasPrefix("x-safari-") else {
-            return nil
+    /// 从「被包了一层的 URI」里抠出内层的 http(s) 地址。
+    ///
+    /// 覆盖这几种写法（都是站点为了唤起 App 塞进页面的）：
+    ///   `x-safari-https://x.com/a`      → https://x.com/a
+    ///   `x-safari-http://x.com/a`       → http://x.com/a
+    ///   `safari-https://x.com/a`        → https://x.com/a
+    ///   `intent://x.com/a`（不带 http） → nil（交给系统）
+    private static func unwrapInnerWebURL(_ uri: String) -> String? {
+        let lowered = uri.lowercased()
+
+        // 必须在开头之后出现，且前面不能已经就是 http(s)
+        for scheme in ["https://", "http://"] {
+            guard let range = lowered.range(of: scheme), range.lowerBound != uri.startIndex else {
+                continue
+            }
+            let inner = String(uri[range.lowerBound...])
+            // 去掉可能的尾部分隔符
+            if let end = inner.firstIndex(where: { $0 == "\u{0}" }) {
+                return String(inner[..<end])
+            }
+            return inner
         }
-        let innerScheme = uri[uri.startIndex..<colon.lowerBound]
-        let stripped = String(innerScheme.dropFirst("x-safari-".count))
-        guard !stripped.isEmpty else { return nil }
-        let rest = String(uri[colon.upperBound...])
-        return stripped + ":" + rest
+        return nil
     }
 
     private static func scheme(of uri: String) -> String? {
@@ -121,25 +134,30 @@ final class GeckoEngine: NSObject, BrowserEngine {
     /// 处理一个非 http(s) 的 URI；返回 true 表示「已经接管，不要让 Gecko 继续」。
     @discardableResult
     private static func handleExternal(uri: String, session: GeckoSession) -> Bool {
-        if let fixed = stripSafariPrefix(uri) {
+        // 1) 被包了一层的网页地址：自己拆开重新加载
+        if let inner = unwrapInnerWebURL(uri) {
             DispatchQueue.main.async {
-                NSLog("GeckoBrowser: x-safari rewrite → \(fixed)")
-                session.load(fixed)
+                NSLog("GeckoBrowser: unwrap external → \(inner)")
+                session.load(inner)
             }
             return true
         }
 
+        // 2) 普通 http(s) 不归这里管
         guard let scheme = scheme(of: uri), !passthroughSchemes.contains(scheme) else {
             return false
         }
 
+        // 3) 其余自定义协议：交给系统。不先问 canOpenURL——
+        //    第三方 App 没有 LSApplicationQueriesSchemes 白名单时 canOpenURL 恒为 false，
+        //    但 open 本身对已安装的 App 仍然有效。
         if let url = URL(string: uri) {
             DispatchQueue.main.async {
-                if UIApplication.shared.canOpenURL(url) {
-                    NSLog("GeckoBrowser: open external scheme \(scheme)")
-                    UIApplication.shared.open(url, options: [:], completionHandler: nil)
-                } else {
-                    NSLog("GeckoBrowser: no handler for scheme \(scheme), ignoring")
+                NSLog("GeckoBrowser: open external scheme \(scheme)")
+                UIApplication.shared.open(url, options: [:]) { ok in
+                    if !ok {
+                        NSLog("GeckoBrowser: scheme \(scheme) not handled by any app")
+                    }
                 }
             }
         }
